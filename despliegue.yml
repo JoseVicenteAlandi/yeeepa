@@ -3,43 +3,55 @@ on:
   push:
     branches:
       - main
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
+          extensions: mbstring, xml, ctype, iconv # Asegura extensiones básicas
+
       - name: Install dependencies
         run: composer install
+
       - name: Run tests
         run: ./vendor/bin/phpunit tests
+
   deploy:
     runs-on: ubuntu-latest
     needs: test
     steps:
       - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.3'
-      - name: Install dependencies
-        run: composer install
-      - name: Deploy to server
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH/Rsync
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          HOST: ${{ secrets.HOST }}
-          USERNAME: ${{ secrets.USERNAME }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
+          # Configuración segura del agente SSH
           mkdir -p ~/.ssh
-          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "mkdir -p $DEPLOY_PATH"
-          rsync -avz --delete --no-t --exclude 'tests' --exclude '.git' . $USERNAME@$HOST:$DEPLOY_PATH
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "cd $DEPLOY_PATH && composer install --no-dev --optimize-autoloader"
-          ssh -o StrictHostKeyChecking=no $USERNAME@$HOST "sudo systemctl restart apache2"
+          eval $(ssh-agent -s)
+          echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+          echo "Host *" > ~/.ssh/config
+          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
+
+          # Sincronización de archivos (excluimos lo innecesario)
+          rsync -avz --delete \
+            --exclude '.git*' \
+            --exclude 'tests' \
+            --exclude 'phpunit.xml' \
+            . ${{ secrets.USERNAME }}@${{ secrets.HOST }}:${{ secrets.DEPLOY_PATH }}
+
+          # Comandos remotos
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
+            cd ${{ secrets.DEPLOY_PATH }}
+            composer install --no-dev --optimize-autoloader --no-interaction
+            # Intentar reiniciar apache (requiere configuración NOPASSWD en el server)
+            sudo systemctl restart apache2
+          EOF
